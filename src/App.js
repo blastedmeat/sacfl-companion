@@ -90,8 +90,24 @@ function useKeepers(year) {
   return data;
 }
 
-// ═══════════════════════════════════════════════════════
-// CONSTANTS
+function useTradeYear(year) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [cache, setCache] = useState({});
+
+  useEffect(() => {
+    if (!year) return;
+    if (cache[year]) { setData(cache[year]); return; }
+    setLoading(true);
+    fsDoc("trades", String(year)).then(d => {
+      const t = d?.trades || [];
+      setCache(c => ({ ...c, [year]: t }));
+      setData(t); setLoading(false);
+    }).catch(() => { setData([]); setLoading(false); });
+  }, [year, cache]);
+
+  return { data, loading };
+}
 // ═══════════════════════════════════════════════════════
 
 const SC = {
@@ -105,6 +121,8 @@ const PO = { QB: 1, RB: 2, WR: 3, TE: 4, PK: 5, DEF: 6 };
 const SO = { R: 0, GPII: 1, K: 2, NK: 3, FAE: 4 };
 const DH_YEARS = [];
 for (let y = 2025; y >= 1999; y--) { if (y !== 2001 && y !== 2002) DH_YEARS.push(y); }
+const TRADE_YEARS = [];
+for (let y = 2025; y >= 2003; y--) TRADE_YEARS.push(y);
 
 const mono = "'JetBrains Mono', monospace";
 const display = "'Anybody', sans-serif";
@@ -544,6 +562,64 @@ function LeagueInfoView({ teams, leagueInfo }) {
 }
 
 // ═══════════════════════════════════════════════════════
+// TRADE LOG TAB
+// ═══════════════════════════════════════════════════════
+
+function TradeLogView() {
+  const [year, setYear] = useState(2025);
+  const [search, setSearch] = useState("");
+  const { data: trades, loading } = useTradeYear(year);
+
+  const filtered = useMemo(() => {
+    if (!trades) return [];
+    if (!search) return trades;
+    const s = search.toLowerCase();
+    return trades.filter(t => t.sides.some(side =>
+      side.team.toLowerCase().includes(s) || side.desc.toLowerCase().includes(s)
+    ));
+  }, [trades, search]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
+        <select value={year} onChange={e => setYear(Number(e.target.value))} style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, fontWeight: 700, background: "#fff", cursor: "pointer", fontFamily: "inherit" }}>
+          {TRADE_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+        </select>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search team or player..." style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, flex: "1 1 200px", minWidth: 180, outline: "none", fontFamily: "inherit" }} />
+        {!loading && <span style={{ fontSize: 12, color: "#94a3b8" }}>{filtered.length} trades</span>}
+      </div>
+
+      {loading && <Spin msg={`Loading ${year} trades...`} />}
+
+      {!loading && filtered.length === 0 && (
+        <div style={{ textAlign: "center", padding: 40, color: "#94a3b8", fontSize: 14 }}>No trades found for {year}</div>
+      )}
+
+      {!loading && filtered.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {filtered.map((trade, ti) => (
+            <div key={ti} style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", overflow: "hidden" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", background: "#f8fafc", borderBottom: "1px solid #e2e5e9" }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#0f172a" }}>Trade #{trade.num}</span>
+                {trade.date && <span style={{ fontSize: 12, color: "#64748b", fontFamily: mono }}>{trade.date}</span>}
+              </div>
+              <div style={{ padding: "12px 16px" }}>
+                {trade.sides.map((side, si) => (
+                  <div key={si} style={{ marginBottom: si < trade.sides.length - 1 ? 10 : 0, paddingBottom: si < trade.sides.length - 1 ? 10 : 0, borderBottom: si < trade.sides.length - 1 ? "1px solid #f1f5f9" : "none" }}>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: "#2563eb", textTransform: "uppercase", letterSpacing: 0.5 }}>{side.team}</span>
+                    <div style={{ fontSize: 13, color: "#334155", marginTop: 4, lineHeight: 1.5 }}>{side.desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════
 
@@ -552,6 +628,7 @@ const TABS = [
   { id: "rosters", label: "All Rosters" },
   { id: "picks", label: "Draft Picks" },
   { id: "draftHistory", label: "Draft History" },
+  { id: "trades", label: "Trade Log" },
   { id: "history", label: "Name History" },
   { id: "info", label: "League Info" },
 ];
@@ -604,6 +681,7 @@ function App() {
           {tab === "rosters" && <AllRosters teams={d.teams} rosters={d.rosters} onSelectTeam={go} />}
           {tab === "picks" && <DraftPickTracker teams={d.teams} draftPicks={d.draftPicks} />}
           {tab === "draftHistory" && <DraftHistoryView />}
+          {tab === "trades" && <TradeLogView />}
           {tab === "history" && <NameHistoryView nameHistory={d.nameHistory} leagueInfo={d.leagueInfo} />}
           {tab === "info" && <LeagueInfoView teams={d.teams} leagueInfo={d.leagueInfo} />}
         </>}
