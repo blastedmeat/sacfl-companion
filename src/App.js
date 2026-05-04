@@ -568,7 +568,44 @@ function LeagueInfoView({ teams, leagueInfo }) {
 function TradeLogView() {
   const [year, setYear] = useState(2025);
   const [search, setSearch] = useState("");
-  const { data: trades, loading } = useTradeYear(year);
+  const [allTradesCache, setAllTradesCache] = useState(null);
+  const [allLoading, setAllLoading] = useState(false);
+  const { data: singleYearData, loading: singleLoading } = useTradeYear(year);
+
+  const isAllYears = year === 0;
+
+  // Load all years when "All Years" is selected
+  useEffect(() => {
+    if (!isAllYears || allTradesCache) return;
+    setAllLoading(true);
+    Promise.all(TRADE_YEARS.map(y =>
+      fsDoc("trades", String(y)).then(d => ({ year: y, trades: d?.trades || [] }))
+    )).then(results => {
+      const all = [];
+      results.sort((a, b) => b.year - a.year);
+      results.forEach(r => {
+        r.trades.forEach(t => all.push({ ...t, year: r.year }));
+      });
+      setAllTradesCache(all);
+      setAllLoading(false);
+    }).catch(() => setAllLoading(false));
+  }, [isAllYears, allTradesCache]);
+
+  // Auto-switch to All Years when searching, back to single year when cleared
+  const handleSearch = (val) => {
+    setSearch(val);
+    if (val.length >= 2 && year !== 0) {
+      setYear(0);
+    }
+  };
+
+  const handleYearChange = (val) => {
+    setYear(val);
+    if (val !== 0) setSearch("");
+  };
+
+  const trades = isAllYears ? allTradesCache : singleYearData;
+  const loading = isAllYears ? allLoading : singleLoading;
 
   const filtered = useMemo(() => {
     if (!trades) return [];
@@ -582,17 +619,20 @@ function TradeLogView() {
   return (
     <div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
-        <select value={year} onChange={e => setYear(Number(e.target.value))} style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, fontWeight: 700, background: "#fff", cursor: "pointer", fontFamily: "inherit" }}>
+        <select value={year} onChange={e => handleYearChange(Number(e.target.value))} style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, fontWeight: 700, background: "#fff", cursor: "pointer", fontFamily: "inherit" }}>
+          <option value={0}>All Years</option>
           {TRADE_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
         </select>
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search team or player..." style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, flex: "1 1 200px", minWidth: 180, outline: "none", fontFamily: "inherit" }} />
-        {!loading && <span style={{ fontSize: 12, color: "#94a3b8" }}>{filtered.length} trades</span>}
+        <input value={search} onChange={e => handleSearch(e.target.value)} placeholder="Search team or player..." style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, flex: "1 1 200px", minWidth: 180, outline: "none", fontFamily: "inherit" }} />
+        {!loading && <span style={{ fontSize: 12, color: "#94a3b8" }}>{filtered.length} trades{isAllYears && search ? " across all years" : ""}</span>}
       </div>
 
-      {loading && <Spin msg={`Loading ${year} trades...`} />}
+      {loading && <Spin msg={isAllYears ? "Loading all trade history..." : `Loading ${year} trades...`} />}
 
       {!loading && filtered.length === 0 && (
-        <div style={{ textAlign: "center", padding: 40, color: "#94a3b8", fontSize: 14 }}>No trades found for {year}</div>
+        <div style={{ textAlign: "center", padding: 40, color: "#94a3b8", fontSize: 14 }}>
+          {search ? `No trades found for "${search}"` : `No trades found for ${year}`}
+        </div>
       )}
 
       {!loading && filtered.length > 0 && (
@@ -600,8 +640,11 @@ function TradeLogView() {
           {filtered.map((trade, ti) => (
             <div key={ti} style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", overflow: "hidden" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", background: "#f8fafc", borderBottom: "1px solid #e2e5e9" }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#0f172a" }}>Trade #{trade.num}</span>
-                {trade.date && <span style={{ fontSize: 12, color: "#64748b", fontFamily: mono }}>{trade.date}</span>}
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#0f172a" }}>{trade.sides.map(s => s.team).join(" ↔ ")}</span>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  {isAllYears && <span style={{ fontSize: 11, fontWeight: 700, color: "#2563eb", background: "#eff6ff", padding: "2px 8px", borderRadius: 4, fontFamily: mono }}>{trade.year}</span>}
+                  {trade.date && <span style={{ fontSize: 12, color: "#64748b", fontFamily: mono }}>{trade.date}</span>}
+                </div>
               </div>
               <div style={{ padding: "12px 16px" }}>
                 {trade.sides.map((side, si) => (
