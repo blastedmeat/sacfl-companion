@@ -1275,18 +1275,23 @@ const MFL_FRANCHISE_MAP = {
 
 function MflRosterExport() {
   const [status, setStatus] = useState(null);
-  const [mflFile, setMflFile] = useState(null);
   const [playerMap, setPlayerMap] = useState(null);
   const [unmapped, setUnmapped] = useState([]);
   const [loading, setLoading] = useState(false);
   const [rosterPreview, setRosterPreview] = useState(null);
+  const [matchedRosters, setMatchedRosters] = useState(null);
+  const [mflUser, setMflUser] = useState("");
+  const [mflPass, setMflPass] = useState("");
+  const [pushStatus, setPushStatus] = useState(null);
+  const [pushing, setPushing] = useState(false);
 
   const generateExport = async () => {
     setLoading(true);
     setStatus("Loading rosters from database...");
     setUnmapped([]);
-    setMflFile(null);
     setRosterPreview(null);
+    setMatchedRosters(null);
+    setPushStatus(null);
 
     try {
       // 1. Load rosters from Firebase
@@ -1304,10 +1309,8 @@ function MflRosterExport() {
       const nameLookup = {};
       mflPlayers.forEach(p => {
         if (p.name && p.id) {
-          // MFL names are "Last, First" format
           const normalized = p.name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
           nameLookup[normalized] = p;
-          // Also store without comma
           const noComma = normalized.replace(",", "").replace(/\s+/g, " ");
           nameLookup[noComma] = p;
         }
@@ -1315,7 +1318,7 @@ function MflRosterExport() {
 
       // 3. Match roster players to MFL IDs
       setStatus("Matching players to MFL IDs...");
-      const lines = [];
+      const matched = {};
       const unmappedPlayers = [];
       const preview = {};
 
@@ -1324,24 +1327,21 @@ function MflRosterExport() {
         if (!franchiseId) continue;
         const players = rosterData.players || [];
         const teamMatches = [];
+        const teamIds = [];
 
         for (const player of players) {
           const name = player.name || "";
-          // Skip defenses and kickers that might not match well
           const pos = player.pos || "";
-
-          // Try various name formats to find a match
           let mflPlayer = null;
 
-          // Try "Last, First" format (how MFL stores names)
+          // Try exact normalized match
           const normalized = name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
           mflPlayer = nameLookup[normalized];
 
           if (!mflPlayer) {
-            // Try splitting "First Last" into "Last, First"
+            // Try "First Last" -> "Last, First"
             const parts = name.split(/[\s]+/);
             if (parts.length >= 2) {
-              // Handle suffixes like Jr, III, etc
               const suffixes = ["jr", "jr.", "ii", "iii", "iv", "sr", "sr."];
               let last = parts[parts.length - 1];
               let first = parts[0];
@@ -1351,30 +1351,23 @@ function MflRosterExport() {
               }
               const flipped = (last + ", " + first).toLowerCase().replace(/[^a-z,\s]/g, "").trim();
               mflPlayer = nameLookup[flipped];
-
-              // Try without suffix
               if (!mflPlayer) {
                 const simpleLast = parts[parts.length - 1].toLowerCase().replace(/[^a-z]/g, "");
                 const simpleFirst = parts[0].toLowerCase().replace(/[^a-z]/g, "");
-                const simple = simpleLast + ", " + simpleFirst;
-                mflPlayer = nameLookup[simple];
+                mflPlayer = nameLookup[simpleLast + ", " + simpleFirst];
               }
             }
           }
 
           if (!mflPlayer) {
-            // Try partial match - search through all players
-            const searchName = name.toLowerCase().replace(/[^a-z\s]/g, "").trim();
+            // Partial match
+            const searchParts = name.toLowerCase().replace(/[^a-z\s]/g, "").trim().split(/\s+/);
             for (const mp of mflPlayers) {
               if (!mp.name) continue;
-              const mpName = mp.name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
-              // Check if the last name and first initial match
-              const searchParts = searchName.split(/\s+/);
-              const mpParts = mpName.split(",").map(s => s.trim());
+              const mpParts = mp.name.toLowerCase().replace(/[^a-z,\s]/g, "").split(",").map(s => s.trim());
               if (searchParts.length >= 2 && mpParts.length >= 2) {
                 if (mpParts[0] === searchParts[searchParts.length - 1] && mpParts[1][0] === searchParts[0][0]) {
-                  // Position check
-                  if (!pos || mp.position === pos || pos === "DEF" && mp.position === "Def") {
+                  if (!pos || mp.position === pos || (pos === "DEF" && mp.position === "Def")) {
                     mflPlayer = mp;
                     break;
                   }
@@ -1384,20 +1377,17 @@ function MflRosterExport() {
           }
 
           if (mflPlayer) {
-            lines.push(`${franchiseId},${mflPlayer.id}`);
+            teamIds.push(mflPlayer.id);
             teamMatches.push({ name, mflName: mflPlayer.name, mflId: mflPlayer.id, pos });
           } else {
             unmappedPlayers.push({ team: teamId, name, pos });
           }
         }
+        matched[franchiseId] = teamIds;
         preview[teamId] = teamMatches;
       }
 
-      // 4. Generate the import file
-      const csvContent = "Franchise,Player\n" + lines.join("\n");
-      const blob = new Blob([csvContent], { type: "text/csv" });
-      const url = URL.createObjectURL(blob);
-      setMflFile({ url, content: csvContent, count: lines.length });
+      setMatchedRosters(matched);
       setUnmapped(unmappedPlayers);
       setRosterPreview(preview);
       setStatus(null);
@@ -1407,52 +1397,57 @@ function MflRosterExport() {
     setLoading(false);
   };
 
+  const pushToMfl = async () => {
+    if (!matchedRosters || !mflUser || !mflPass) return;
+    setPushing(true);
+    setPushStatus("Logging into MFL and pushing rosters...");
+
+    try {
+      const resp = await fetch("/api/mfl?action=pushRosters", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: mflUser,
+          password: mflPass,
+          rosters: matchedRosters,
+        }),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        setPushStatus("Error: " + data.error);
+      } else {
+        setPushStatus("Rosters pushed to MFL successfully! Check your MFL league to verify.");
+      }
+    } catch (err) {
+      setPushStatus("Error: " + err.message);
+    }
+    setPushing(false);
+  };
+
   return (
     <div style={{ marginTop: 32 }}>
-      <h2 style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 8, fontFamily: display }}>Export Rosters to MFL</h2>
+      <h2 style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 8, fontFamily: display }}>Push Rosters to MFL</h2>
       <p style={{ fontSize: 13, color: "#64748b", marginBottom: 16, lineHeight: 1.6 }}>
-        Generate a roster file from the database that you can import into MFL. This matches player names to MFL player IDs and creates a CSV file.
+        Match players from the database to MFL player IDs and push rosters directly to your 2026 MFL league.
       </p>
 
       <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 24, marginBottom: 16 }}>
-        <p style={{ fontSize: 13, color: "#475569", marginBottom: 16, lineHeight: 1.6 }}>
-          <strong>How it works:</strong> Click the button below to generate the file. Then go to your MFL commissioner page and import it.
-        </p>
         <button onClick={generateExport} disabled={loading} style={{
           padding: "12px 24px", fontSize: 14, fontWeight: 700, border: "none", borderRadius: 8,
           cursor: loading ? "not-allowed" : "pointer",
           background: loading ? "#94a3b8" : "#2563eb", color: "#fff", fontFamily: "inherit",
         }}>
-          {loading ? (status || "Working...") : "Generate MFL Roster File"}
+          {loading ? (status || "Working...") : "Step 1: Match Players to MFL"}
         </button>
       </div>
-
-      {mflFile && (
-        <div style={{ background: "#dcfce7", borderRadius: 10, border: "1px solid #86efac", padding: 16, marginBottom: 16 }}>
-          <h4 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 700, color: "#166534" }}>
-            Roster file ready! ({mflFile.count} players matched)
-          </h4>
-          <a href={mflFile.url} download="sacfl_mfl_rosters.csv" style={{
-            display: "inline-block", padding: "8px 16px", background: "#166534", color: "#fff",
-            borderRadius: 6, fontSize: 13, fontWeight: 700, textDecoration: "none", marginBottom: 12,
-          }}>Download CSV</a>
-          <div style={{ fontSize: 12, color: "#166534", marginTop: 8, lineHeight: 1.6 }}>
-            <strong>To import into MFL:</strong>
-            <div style={{ marginTop: 4 }}>1. Go to your MFL league: <a href="https://www49.myfantasyleague.com/2026/home/20812" target="_blank" rel="noopener noreferrer" style={{ color: "#166534" }}>MFL League Home</a></div>
-            <div>2. Click Commissioner &gt; Roster Import/Export (or go to Options &gt; Commissioner Functions)</div>
-            <div>3. Choose "Import Rosters" and upload the CSV file</div>
-            <div>4. Review and confirm the import</div>
-          </div>
-        </div>
-      )}
 
       {unmapped.length > 0 && (
         <div style={{ background: "#fef3c7", borderRadius: 10, border: "1px solid #fde68a", padding: 16, marginBottom: 16 }}>
           <h4 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 700, color: "#92400e" }}>
-            {unmapped.length} players could not be matched to MFL
+            {unmapped.length} players could not be matched
           </h4>
           <p style={{ fontSize: 12, color: "#92400e", marginBottom: 8 }}>
-            These players may need to be added manually in MFL, or their names may differ slightly.
+            These players will need to be added manually in MFL after the import.
           </p>
           <div style={{ fontSize: 12, color: "#92400e", lineHeight: 1.8 }}>
             {unmapped.map((p, i) => (
@@ -1463,20 +1458,45 @@ function MflRosterExport() {
       )}
 
       {rosterPreview && (
-        <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 16 }}>
+        <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 16, marginBottom: 16 }}>
           <h4 style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 700, color: "#0f172a" }}>Match Preview</h4>
           {Object.entries(rosterPreview).map(([teamId, matches]) => (
-            <div key={teamId} style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: "#2563eb", textTransform: "uppercase", marginBottom: 4 }}>
+            <details key={teamId} style={{ marginBottom: 8 }}>
+              <summary style={{ fontSize: 12, fontWeight: 800, color: "#2563eb", textTransform: "uppercase", cursor: "pointer" }}>
                 {teamId} (MFL #{MFL_FRANCHISE_MAP[teamId]}) - {matches.length} matched
-              </div>
-              <div style={{ fontSize: 11, color: "#64748b", lineHeight: 1.6, paddingLeft: 8 }}>
+              </summary>
+              <div style={{ fontSize: 11, color: "#64748b", lineHeight: 1.6, paddingLeft: 16, marginTop: 4 }}>
                 {matches.map((m, i) => (
                   <div key={i}>{m.name} → {m.mflName} ({m.mflId})</div>
                 ))}
               </div>
-            </div>
+            </details>
           ))}
+        </div>
+      )}
+
+      {matchedRosters && (
+        <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 24, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 700, color: "#0f172a" }}>Step 2: Push to MFL</h4>
+          <p style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>
+            Enter your MFL login credentials to push rosters. Your credentials are sent directly to MFL and are not stored.
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+            <input value={mflUser} onChange={e => setMflUser(e.target.value)} placeholder="MFL Username or Email" style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, width: 200, fontFamily: "inherit" }} />
+            <input type="password" value={mflPass} onChange={e => setMflPass(e.target.value)} placeholder="MFL Password" style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, width: 200, fontFamily: "inherit" }} />
+            <button onClick={pushToMfl} disabled={pushing || !mflUser || !mflPass} style={{
+              padding: "10px 20px", fontSize: 13, fontWeight: 700, border: "none", borderRadius: 8,
+              cursor: (pushing || !mflUser || !mflPass) ? "not-allowed" : "pointer",
+              background: (pushing || !mflUser || !mflPass) ? "#94a3b8" : "#166534", color: "#fff", fontFamily: "inherit",
+            }}>
+              {pushing ? "Pushing..." : "Push Rosters to MFL"}
+            </button>
+          </div>
+          {pushStatus && (
+            <div style={{ fontSize: 13, padding: "8px 12px", borderRadius: 6, marginTop: 8, background: pushStatus.includes("Error") ? "#fef2f2" : "#dcfce7", color: pushStatus.includes("Error") ? "#dc2626" : "#166534" }}>
+              {pushStatus}
+            </div>
+          )}
         </div>
       )}
     </div>
