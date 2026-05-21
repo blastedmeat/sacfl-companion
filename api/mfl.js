@@ -18,48 +18,36 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Missing username, password, or rosters" });
       }
 
-      // 1. Login to get cookie
+      // 1. Login to get cookie - use the SAME server as the league
       const loginResp = await fetch(
-        `${MFL_API}/login?USERNAME=${encodeURIComponent(username)}&PASSWORD=${encodeURIComponent(password)}&XML=1`
+        `https://api.myfantasyleague.com/2026/login?USERNAME=${encodeURIComponent(username)}&PASSWORD=${encodeURIComponent(password)}&XML=1`,
+        { redirect: 'manual' }
       );
       const loginText = await loginResp.text();
 
       // Extract cookie from response
       const cookieMatch = loginText.match(/MFL_USER_ID="([^"]+)"/);
       if (!cookieMatch) {
-        return res.status(401).json({ error: "Login failed. Check your MFL username and password." });
+        return res.status(401).json({ error: "Login failed: " + loginText.substring(0, 200) });
       }
       const mflCookie = cookieMatch[1];
 
-      // 2. Build XML roster data
-      // MFL import format: POST with DATA parameter containing XML
-      // <rosters><franchise id="0001"><player id="12345"/></franchise></rosters>
-      let xml = '<rosters>';
+      // 2. Push rosters using keepers import (one franchise at a time)
+      const results = [];
       for (const [franchiseId, playerIds] of Object.entries(rosters)) {
-        xml += `<franchise id="${franchiseId}">`;
-        for (const pid of playerIds) {
-          xml += `<player id="${pid}"/>`;
-        }
-        xml += '</franchise>';
+        const keepList = playerIds.join(",");
+        const importUrl = `https://www49.myfantasyleague.com/2026/import?TYPE=keepers&L=${MFL_LEAGUE}&FRANCHISE_ID=${franchiseId}&KEEP=${encodeURIComponent(keepList)}`;
+
+        const importResp = await fetch(importUrl, {
+          headers: {
+            'Cookie': `MFL_USER_ID=${mflCookie}`,
+          },
+        });
+        const importText = await importResp.text();
+        results.push({ franchise: franchiseId, response: importText.substring(0, 200) });
       }
-      xml += '</rosters>';
 
-      // 3. Push all rosters in one request
-      const importUrl = `https://www49.myfantasyleague.com/2026/import?TYPE=rosters&L=${MFL_LEAGUE}`;
-      const formData = new URLSearchParams();
-      formData.append('DATA', xml);
-
-      const importResp = await fetch(importUrl, {
-        method: 'POST',
-        headers: {
-          'Cookie': `MFL_USER_ID=${mflCookie}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData.toString(),
-      });
-      const importText = await importResp.text();
-
-      return res.status(200).json({ success: true, response: importText, xml: xml.substring(0, 500) });
+      return res.status(200).json({ success: true, results });
     } catch (error) {
       return res.status(500).json({ error: error.message });
     }

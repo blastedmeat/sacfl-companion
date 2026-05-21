@@ -1416,11 +1416,11 @@ function MflRosterExport() {
       if (data.error) {
         setPushStatus("Error: " + data.error);
       } else {
-        const resp = data.response || "";
-        if (resp.includes("error")) {
-          setPushStatus("MFL responded with: " + resp.substring(0, 200));
+        const errs = (data.results || []).filter(r => r.response.includes("error"));
+        if (errs.length > 0) {
+          setPushStatus("Some franchises had errors: " + errs.map(e => e.franchise + ": " + e.response).join("; ").substring(0, 300));
         } else {
-          setPushStatus("Rosters pushed to MFL successfully! Check your MFL league to verify.");
+          setPushStatus("Rosters pushed to MFL successfully for all " + (data.results || []).length + " franchises! Check your MFL league to verify.");
         }
       }
     } catch (err) {
