@@ -666,8 +666,7 @@ function TradeLogView() {
 // FREE AGENTS TAB (pulls from MFL API)
 // ═══════════════════════════════════════════════════════
 
-const MFL_BASE = "https://www43.myfantasyleague.com/2026/export";
-const MFL_LEAGUE = "67549";
+const MFL_PROXY = "/api/mfl";
 
 function useFreeAgents() {
   const [players, setPlayers] = useState(null);
@@ -676,10 +675,9 @@ function useFreeAgents() {
 
   useEffect(() => {
     setLoading(true);
-    // First get the player list to map IDs to names
     Promise.all([
-      fetch(`${MFL_BASE}?TYPE=freeAgents&L=${MFL_LEAGUE}&JSON=1`).then(r => r.json()),
-      fetch(`${MFL_BASE}?TYPE=players&L=${MFL_LEAGUE}&DETAILS=1&JSON=1`).then(r => r.json()),
+      fetch(`${MFL_PROXY}?type=freeAgents`).then(r => r.json()),
+      fetch(`${MFL_PROXY}?type=players`).then(r => r.json()),
     ]).then(([faData, playerData]) => {
       // Build player lookup from the players endpoint
       const lookup = {};
