@@ -663,12 +663,132 @@ function TradeLogView() {
 }
 
 // ═══════════════════════════════════════════════════════
+// FREE AGENTS TAB (pulls from MFL API)
+// ═══════════════════════════════════════════════════════
+
+const MFL_BASE = "https://www43.myfantasyleague.com/2026/export";
+const MFL_LEAGUE = "67549";
+
+function useFreeAgents() {
+  const [players, setPlayers] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    // First get the player list to map IDs to names
+    Promise.all([
+      fetch(`${MFL_BASE}?TYPE=freeAgents&L=${MFL_LEAGUE}&JSON=1`).then(r => r.json()),
+      fetch(`${MFL_BASE}?TYPE=players&L=${MFL_LEAGUE}&DETAILS=1&JSON=1`).then(r => r.json()),
+    ]).then(([faData, playerData]) => {
+      // Build player lookup from the players endpoint
+      const lookup = {};
+      const allPlayers = playerData?.players?.player || [];
+      if (Array.isArray(allPlayers)) {
+        allPlayers.forEach(p => { lookup[p.id] = p; });
+      }
+
+      // Parse free agents
+      const faList = faData?.freeAgents?.leagueUnit?.player || [];
+      const parsed = (Array.isArray(faList) ? faList : [faList]).filter(Boolean).map(fa => {
+        const info = lookup[fa.id] || {};
+        return {
+          id: fa.id,
+          name: info.name ? info.name.replace(/,\s*/, ", ") : `Player ${fa.id}`,
+          pos: info.position || "??",
+          nflTeam: info.team || "",
+          age: info.age || "",
+          drafted: info.draft_year || "",
+        };
+      }).filter(p => ["QB","RB","WR","TE","PK","Def","DE","DT","LB","CB","S"].includes(p.pos));
+
+      setPlayers(parsed);
+      setLoading(false);
+    }).catch(e => {
+      setError(e.message);
+      setLoading(false);
+    });
+  }, []);
+
+  return { players, loading, error };
+}
+
+function FreeAgentsView() {
+  const { players, loading, error } = useFreeAgents();
+  const [posFilter, setPosFilter] = useState("all");
+  const [search, setSearch] = useState("");
+
+  // Map MFL positions to fantasy-relevant groups
+  const POS_GROUPS = { QB: "QB", RB: "RB", WR: "WR", TE: "TE", PK: "PK", Def: "DEF" };
+  const POSITIONS = ["all", "QB", "RB", "WR", "TE", "PK", "DEF"];
+
+  const filtered = useMemo(() => {
+    if (!players) return [];
+    let f = players;
+    if (posFilter !== "all") {
+      if (posFilter === "DEF") {
+        f = f.filter(p => p.pos === "Def");
+      } else {
+        f = f.filter(p => p.pos === posFilter);
+      }
+    }
+    if (search) {
+      const s = search.toLowerCase();
+      f = f.filter(p => p.name.toLowerCase().includes(s) || p.nflTeam.toLowerCase().includes(s));
+    }
+    return f.sort((a, b) => {
+      const po = (PO[a.pos] || PO[POS_GROUPS[a.pos]] || 99) - (PO[b.pos] || PO[POS_GROUPS[b.pos]] || 99);
+      return po !== 0 ? po : a.name.localeCompare(b.name);
+    });
+  }, [players, posFilter, search]);
+
+  if (error) return <div style={{ color: "#dc2626", padding: 20 }}>Error loading free agents from MFL: {error}</div>;
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search player or NFL team..." style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, flex: "1 1 200px", minWidth: 180, outline: "none", fontFamily: "inherit" }} />
+        {POSITIONS.map(p => (
+          <button key={p} onClick={() => setPosFilter(p)} style={{ padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: "pointer", border: posFilter === p ? "2px solid #2563eb" : "1px solid #d1d5db", background: posFilter === p ? "#eff6ff" : "#fff", color: posFilter === p ? "#2563eb" : "#64748b", fontFamily: "inherit" }}>{p === "all" ? "All" : p}</button>
+        ))}
+        {!loading && players && <span style={{ fontSize: 12, color: "#94a3b8" }}>{filtered.length} players</span>}
+      </div>
+
+      {loading && <Spin msg="Loading free agents from MFL..." />}
+
+      {!loading && players && (
+        <div style={{ overflowX: "auto", background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead><tr style={{ borderBottom: "2px solid #e2e5e9" }}>
+              {["Player","Pos","NFL Team","Age"].map(h => (
+                <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: "#64748b", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>{filtered.map((p, i) => (
+              <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                <td style={{ padding: "7px 10px", fontWeight: 600, color: "#0f172a" }}>{p.name}</td>
+                <td style={{ padding: "7px 10px", fontFamily: mono, fontSize: 12 }}>
+                  <span style={{ padding: "2px 6px", borderRadius: 3, fontSize: 11, fontWeight: 600, background: {QB:"#dbeafe",RB:"#dcfce7",WR:"#fef3c7",TE:"#fce7f3",PK:"#e2e5e9",Def:"#e2e5e9"}[p.pos] || "#e2e5e9", color: {QB:"#1d4ed8",RB:"#166534",WR:"#92400e",TE:"#be185d",PK:"#374151",Def:"#374151"}[p.pos] || "#374151" }}>{p.pos === "Def" ? "DEF" : p.pos}</span>
+                </td>
+                <td style={{ padding: "7px 10px", color: "#475569", fontSize: 12 }}>{p.nflTeam}</td>
+                <td style={{ padding: "7px 10px", color: "#64748b", fontSize: 12 }}>{p.age}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════
 
 const TABS = [
   { id: "teams", label: "Teams" },
   { id: "rosters", label: "All Rosters" },
+  { id: "freeAgents", label: "Free Agents" },
   { id: "picks", label: "Draft Picks" },
   { id: "draftHistory", label: "Draft History" },
   { id: "trades", label: "Trade Log" },
@@ -722,6 +842,7 @@ function App() {
           )}
           {tab === "teams" && sel && d.teams?.[sel] && <TeamDetail id={sel} team={d.teams[sel]} roster={d.rosters?.[sel]} picks={d.draftPicks?.[sel]} onBack={() => setSel(null)} />}
           {tab === "rosters" && <AllRosters teams={d.teams} rosters={d.rosters} onSelectTeam={go} />}
+          {tab === "freeAgents" && <FreeAgentsView />}
           {tab === "picks" && <DraftPickTracker teams={d.teams} draftPicks={d.draftPicks} />}
           {tab === "draftHistory" && <DraftHistoryView />}
           {tab === "trades" && <TradeLogView />}
