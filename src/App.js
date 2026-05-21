@@ -1416,7 +1416,12 @@ function MflRosterExport() {
       if (data.error) {
         setPushStatus("Error: " + data.error);
       } else {
-        setPushStatus("Rosters pushed to MFL successfully! Check your MFL league to verify.");
+        const resp = data.response || "";
+        if (resp.includes("error")) {
+          setPushStatus("MFL responded with: " + resp.substring(0, 200));
+        } else {
+          setPushStatus("Rosters pushed to MFL successfully! Check your MFL league to verify.");
+        }
       }
     } catch (err) {
       setPushStatus("Error: " + err.message);
