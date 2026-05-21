@@ -1259,6 +1259,226 @@ function AdminView() {
           <p style={{ fontSize: 12, color: "#166534", marginTop: 8 }}>Refresh the page to see the updated data.</p>
         </div>
       )}
+
+      <MflRosterExport />
+    </div>
+  );
+}
+
+// MFL Franchise ID mapping
+const MFL_FRANCHISE_MAP = {
+  bishops: "0001", butchers: "0002", hilander: "0003",
+  pandas: "0004", jacks: "0005", toll: "0006",
+  convicts: "0007", leprechauns: "0008", mounties: "0009",
+  brawlers: "0010", mudcats: "0011", ntc: "0012",
+};
+
+function MflRosterExport() {
+  const [status, setStatus] = useState(null);
+  const [mflFile, setMflFile] = useState(null);
+  const [playerMap, setPlayerMap] = useState(null);
+  const [unmapped, setUnmapped] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [rosterPreview, setRosterPreview] = useState(null);
+
+  const generateExport = async () => {
+    setLoading(true);
+    setStatus("Loading rosters from database...");
+    setUnmapped([]);
+    setMflFile(null);
+    setRosterPreview(null);
+
+    try {
+      // 1. Load rosters from Firebase
+      const rosterSnap = await getDocs(collection(db, "rosters"));
+      const rosters = {};
+      rosterSnap.forEach(d => { rosters[d.id] = d.data(); });
+
+      // 2. Load MFL player database for name matching
+      setStatus("Loading MFL player database...");
+      const playerResp = await fetch("/api/mfl?type=players");
+      const playerData = await playerResp.json();
+      const mflPlayers = playerData?.players?.player || [];
+
+      // Build lookup by normalized name
+      const nameLookup = {};
+      mflPlayers.forEach(p => {
+        if (p.name && p.id) {
+          // MFL names are "Last, First" format
+          const normalized = p.name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
+          nameLookup[normalized] = p;
+          // Also store without comma
+          const noComma = normalized.replace(",", "").replace(/\s+/g, " ");
+          nameLookup[noComma] = p;
+        }
+      });
+
+      // 3. Match roster players to MFL IDs
+      setStatus("Matching players to MFL IDs...");
+      const lines = [];
+      const unmappedPlayers = [];
+      const preview = {};
+
+      for (const [teamId, rosterData] of Object.entries(rosters)) {
+        const franchiseId = MFL_FRANCHISE_MAP[teamId];
+        if (!franchiseId) continue;
+        const players = rosterData.players || [];
+        const teamMatches = [];
+
+        for (const player of players) {
+          const name = player.name || "";
+          // Skip defenses and kickers that might not match well
+          const pos = player.pos || "";
+
+          // Try various name formats to find a match
+          let mflPlayer = null;
+
+          // Try "Last, First" format (how MFL stores names)
+          const normalized = name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
+          mflPlayer = nameLookup[normalized];
+
+          if (!mflPlayer) {
+            // Try splitting "First Last" into "Last, First"
+            const parts = name.split(/[\s]+/);
+            if (parts.length >= 2) {
+              // Handle suffixes like Jr, III, etc
+              const suffixes = ["jr", "jr.", "ii", "iii", "iv", "sr", "sr."];
+              let last = parts[parts.length - 1];
+              let first = parts[0];
+              if (parts.length > 2 && suffixes.includes(parts[parts.length - 1].toLowerCase())) {
+                last = parts[parts.length - 2] + " " + parts[parts.length - 1];
+                first = parts[0];
+              }
+              const flipped = (last + ", " + first).toLowerCase().replace(/[^a-z,\s]/g, "").trim();
+              mflPlayer = nameLookup[flipped];
+
+              // Try without suffix
+              if (!mflPlayer) {
+                const simpleLast = parts[parts.length - 1].toLowerCase().replace(/[^a-z]/g, "");
+                const simpleFirst = parts[0].toLowerCase().replace(/[^a-z]/g, "");
+                const simple = simpleLast + ", " + simpleFirst;
+                mflPlayer = nameLookup[simple];
+              }
+            }
+          }
+
+          if (!mflPlayer) {
+            // Try partial match - search through all players
+            const searchName = name.toLowerCase().replace(/[^a-z\s]/g, "").trim();
+            for (const mp of mflPlayers) {
+              if (!mp.name) continue;
+              const mpName = mp.name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
+              // Check if the last name and first initial match
+              const searchParts = searchName.split(/\s+/);
+              const mpParts = mpName.split(",").map(s => s.trim());
+              if (searchParts.length >= 2 && mpParts.length >= 2) {
+                if (mpParts[0] === searchParts[searchParts.length - 1] && mpParts[1][0] === searchParts[0][0]) {
+                  // Position check
+                  if (!pos || mp.position === pos || pos === "DEF" && mp.position === "Def") {
+                    mflPlayer = mp;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+
+          if (mflPlayer) {
+            lines.push(`${franchiseId},${mflPlayer.id}`);
+            teamMatches.push({ name, mflName: mflPlayer.name, mflId: mflPlayer.id, pos });
+          } else {
+            unmappedPlayers.push({ team: teamId, name, pos });
+          }
+        }
+        preview[teamId] = teamMatches;
+      }
+
+      // 4. Generate the import file
+      const csvContent = "Franchise,Player\n" + lines.join("\n");
+      const blob = new Blob([csvContent], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      setMflFile({ url, content: csvContent, count: lines.length });
+      setUnmapped(unmappedPlayers);
+      setRosterPreview(preview);
+      setStatus(null);
+    } catch (err) {
+      setStatus("Error: " + err.message);
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ marginTop: 32 }}>
+      <h2 style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 8, fontFamily: display }}>Export Rosters to MFL</h2>
+      <p style={{ fontSize: 13, color: "#64748b", marginBottom: 16, lineHeight: 1.6 }}>
+        Generate a roster file from the database that you can import into MFL. This matches player names to MFL player IDs and creates a CSV file.
+      </p>
+
+      <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 24, marginBottom: 16 }}>
+        <p style={{ fontSize: 13, color: "#475569", marginBottom: 16, lineHeight: 1.6 }}>
+          <strong>How it works:</strong> Click the button below to generate the file. Then go to your MFL commissioner page and import it.
+        </p>
+        <button onClick={generateExport} disabled={loading} style={{
+          padding: "12px 24px", fontSize: 14, fontWeight: 700, border: "none", borderRadius: 8,
+          cursor: loading ? "not-allowed" : "pointer",
+          background: loading ? "#94a3b8" : "#2563eb", color: "#fff", fontFamily: "inherit",
+        }}>
+          {loading ? (status || "Working...") : "Generate MFL Roster File"}
+        </button>
+      </div>
+
+      {mflFile && (
+        <div style={{ background: "#dcfce7", borderRadius: 10, border: "1px solid #86efac", padding: 16, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 700, color: "#166534" }}>
+            Roster file ready! ({mflFile.count} players matched)
+          </h4>
+          <a href={mflFile.url} download="sacfl_mfl_rosters.csv" style={{
+            display: "inline-block", padding: "8px 16px", background: "#166534", color: "#fff",
+            borderRadius: 6, fontSize: 13, fontWeight: 700, textDecoration: "none", marginBottom: 12,
+          }}>Download CSV</a>
+          <div style={{ fontSize: 12, color: "#166534", marginTop: 8, lineHeight: 1.6 }}>
+            <strong>To import into MFL:</strong>
+            <div style={{ marginTop: 4 }}>1. Go to your MFL league: <a href="https://www49.myfantasyleague.com/2026/home/20812" target="_blank" rel="noopener noreferrer" style={{ color: "#166534" }}>MFL League Home</a></div>
+            <div>2. Click Commissioner &gt; Roster Import/Export (or go to Options &gt; Commissioner Functions)</div>
+            <div>3. Choose "Import Rosters" and upload the CSV file</div>
+            <div>4. Review and confirm the import</div>
+          </div>
+        </div>
+      )}
+
+      {unmapped.length > 0 && (
+        <div style={{ background: "#fef3c7", borderRadius: 10, border: "1px solid #fde68a", padding: 16, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 700, color: "#92400e" }}>
+            {unmapped.length} players could not be matched to MFL
+          </h4>
+          <p style={{ fontSize: 12, color: "#92400e", marginBottom: 8 }}>
+            These players may need to be added manually in MFL, or their names may differ slightly.
+          </p>
+          <div style={{ fontSize: 12, color: "#92400e", lineHeight: 1.8 }}>
+            {unmapped.map((p, i) => (
+              <div key={i}>{p.team.toUpperCase()}: {p.name} ({p.pos})</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {rosterPreview && (
+        <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 16 }}>
+          <h4 style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 700, color: "#0f172a" }}>Match Preview</h4>
+          {Object.entries(rosterPreview).map(([teamId, matches]) => (
+            <div key={teamId} style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#2563eb", textTransform: "uppercase", marginBottom: 4 }}>
+                {teamId} (MFL #{MFL_FRANCHISE_MAP[teamId]}) - {matches.length} matched
+              </div>
+              <div style={{ fontSize: 11, color: "#64748b", lineHeight: 1.6, paddingLeft: 8 }}>
+                {matches.map((m, i) => (
+                  <div key={i}>{m.name} → {m.mflName} ({m.mflId})</div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
