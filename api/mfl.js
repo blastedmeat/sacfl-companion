@@ -3,7 +3,7 @@ export default async function handler(req, res) {
   const MFL_LEAGUE = "20812";
   const MFL_BASE = "https://www49.myfantasyleague.com/2025/export";
 
-  const validTypes = ["freeAgents", "players", "rosters", "liveScoring"];
+  const validTypes = ["freeAgents", "players", "rosters", "liveScoring", "playerScores", "topAdds"];
   if (!validTypes.includes(type)) {
     return res.status(400).json({ error: "Invalid type" });
   }
@@ -12,6 +12,10 @@ export default async function handler(req, res) {
     let url = `${MFL_BASE}?TYPE=${type}&L=${MFL_LEAGUE}&JSON=1`;
     if (type === "players") {
       url += "&DETAILS=1";
+    }
+    if (type === "playerScores") {
+      // Get full season YTD scores for all players
+      url += "&SEASON=2025&RULES=1";
     }
 
     const response = await fetch(url);

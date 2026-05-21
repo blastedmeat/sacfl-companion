@@ -679,12 +679,22 @@ function useFreeAgents() {
     Promise.all([
       fetch(`${MFL_PROXY}?type=freeAgents`).then(r => r.json()),
       fetch(`${MFL_PROXY}?type=players`).then(r => r.json()),
-    ]).then(([faData, playerData]) => {
-      // Build player lookup from the players endpoint
+      fetch(`${MFL_PROXY}?type=playerScores`).then(r => r.json()).catch(() => null),
+    ]).then(([faData, playerData, scoresData]) => {
+      // Build player lookup
       const lookup = {};
       const allPlayers = playerData?.players?.player || [];
       if (Array.isArray(allPlayers)) {
         allPlayers.forEach(p => { lookup[p.id] = p; });
+      }
+
+      // Build scores lookup
+      const scoreLookup = {};
+      const scoreList = scoresData?.playerScores?.playerScore || [];
+      if (Array.isArray(scoreList)) {
+        scoreList.forEach(s => {
+          if (s.id && s.score) scoreLookup[s.id] = parseFloat(s.score) || 0;
+        });
       }
 
       // Parse free agents
@@ -697,9 +707,9 @@ function useFreeAgents() {
           pos: info.position || "??",
           nflTeam: info.team || "",
           age: info.age || "",
-          drafted: info.draft_year || "",
+          pts: scoreLookup[fa.id] || 0,
         };
-      }).filter(p => ["QB","RB","WR","TE","PK","Def","DE","DT","LB","CB","S"].includes(p.pos));
+      }).filter(p => ["QB","RB","WR","TE","PK","Def"].includes(p.pos));
 
       setPlayers(parsed);
       setLoading(false);
@@ -716,9 +726,9 @@ function FreeAgentsView() {
   const { players, loading, error } = useFreeAgents();
   const [posFilter, setPosFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [hideFA, setHideFA] = useState(false);
+  const [sortBy, setSortBy] = useState("pts");
 
-  // Map MFL positions to fantasy-relevant groups
-  const POS_GROUPS = { QB: "QB", RB: "RB", WR: "WR", TE: "TE", PK: "PK", Def: "DEF" };
   const POSITIONS = ["all", "QB", "RB", "WR", "TE", "PK", "DEF"];
 
   const filtered = useMemo(() => {
@@ -731,26 +741,47 @@ function FreeAgentsView() {
         f = f.filter(p => p.pos === posFilter);
       }
     }
+    if (hideFA) {
+      f = f.filter(p => p.nflTeam && p.nflTeam !== "FA" && p.nflTeam !== "");
+    }
     if (search) {
       const s = search.toLowerCase();
       f = f.filter(p => p.name.toLowerCase().includes(s) || p.nflTeam.toLowerCase().includes(s));
     }
-    return f.sort((a, b) => {
-      const po = (PO[a.pos] || PO[POS_GROUPS[a.pos]] || 99) - (PO[b.pos] || PO[POS_GROUPS[b.pos]] || 99);
-      return po !== 0 ? po : a.name.localeCompare(b.name);
-    });
-  }, [players, posFilter, search]);
+    if (sortBy === "pts") {
+      f = [...f].sort((a, b) => b.pts - a.pts);
+    } else if (sortBy === "name") {
+      f = [...f].sort((a, b) => a.name.localeCompare(b.name));
+    } else if (sortBy === "pos") {
+      f = [...f].sort((a, b) => {
+        const po = (PO[a.pos] || PO[a.pos === "Def" ? "DEF" : a.pos] || 99) - (PO[b.pos] || PO[b.pos === "Def" ? "DEF" : b.pos] || 99);
+        return po !== 0 ? po : b.pts - a.pts;
+      });
+    }
+    return f;
+  }, [players, posFilter, search, hideFA, sortBy]);
 
   if (error) return <div style={{ color: "#dc2626", padding: 20 }}>Error loading free agents from MFL: {error}</div>;
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search player or NFL team..." style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, flex: "1 1 200px", minWidth: 180, outline: "none", fontFamily: "inherit" }} />
         {POSITIONS.map(p => (
           <button key={p} onClick={() => setPosFilter(p)} style={{ padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: "pointer", border: posFilter === p ? "2px solid #2563eb" : "1px solid #d1d5db", background: posFilter === p ? "#eff6ff" : "#fff", color: posFilter === p ? "#2563eb" : "#64748b", fontFamily: "inherit" }}>{p === "all" ? "All" : p}</button>
         ))}
         {!loading && players && <span style={{ fontSize: 12, color: "#94a3b8" }}>{filtered.length} players</span>}
+      </div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#475569", cursor: "pointer" }}>
+          <input type="checkbox" checked={hideFA} onChange={e => setHideFA(e.target.checked)} />
+          Hide players without NFL team
+        </label>
+        <span style={{ fontSize: 12, color: "#94a3b8" }}>|</span>
+        <span style={{ fontSize: 12, color: "#64748b" }}>Sort by:</span>
+        {[["pts","2025 Pts"],["name","Name"],["pos","Position"]].map(([val, label]) => (
+          <button key={val} onClick={() => setSortBy(val)} style={{ padding: "4px 10px", borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: "pointer", border: sortBy === val ? "1px solid #2563eb" : "1px solid #d1d5db", background: sortBy === val ? "#eff6ff" : "#fff", color: sortBy === val ? "#2563eb" : "#64748b", fontFamily: "inherit" }}>{label}</button>
+        ))}
       </div>
 
       {loading && <Spin msg="Loading free agents from MFL..." />}
@@ -759,8 +790,8 @@ function FreeAgentsView() {
         <div style={{ overflowX: "auto", background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead><tr style={{ borderBottom: "2px solid #e2e5e9" }}>
-              {["Player","Pos","NFL Team","Age"].map(h => (
-                <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: "#64748b", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
+              {["Player","Pos","NFL Team","Age","2025 Pts"].map(h => (
+                <th key={h} style={{ textAlign: h === "2025 Pts" ? "right" : "left", padding: "8px 10px", color: "#64748b", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
               ))}
             </tr></thead>
             <tbody>{filtered.map((p, i) => (
@@ -769,8 +800,9 @@ function FreeAgentsView() {
                 <td style={{ padding: "7px 10px", fontFamily: mono, fontSize: 12 }}>
                   <span style={{ padding: "2px 6px", borderRadius: 3, fontSize: 11, fontWeight: 600, background: {QB:"#dbeafe",RB:"#dcfce7",WR:"#fef3c7",TE:"#fce7f3",PK:"#e2e5e9",Def:"#e2e5e9"}[p.pos] || "#e2e5e9", color: {QB:"#1d4ed8",RB:"#166534",WR:"#92400e",TE:"#be185d",PK:"#374151",Def:"#374151"}[p.pos] || "#374151" }}>{p.pos === "Def" ? "DEF" : p.pos}</span>
                 </td>
-                <td style={{ padding: "7px 10px", color: "#475569", fontSize: 12 }}>{p.nflTeam}</td>
+                <td style={{ padding: "7px 10px", color: p.nflTeam === "FA" || !p.nflTeam ? "#d1d5db" : "#475569", fontSize: 12 }}>{p.nflTeam || "FA"}</td>
                 <td style={{ padding: "7px 10px", color: "#64748b", fontSize: 12 }}>{p.age}</td>
+                <td style={{ padding: "7px 10px", color: p.pts > 0 ? "#0f172a" : "#d1d5db", fontSize: 12, fontWeight: p.pts > 0 ? 600 : 400, textAlign: "right", fontFamily: mono }}>{p.pts > 0 ? p.pts.toFixed(1) : "0.0"}</td>
               </tr>
             ))}</tbody>
           </table>
