@@ -850,7 +850,7 @@ function App() {
       </div>
       <div style={{ textAlign: "center", padding: "16px 24px", fontSize: 11, color: "#94a3b8", borderTop: "1px solid #e2e5e9" }}>
         SACFL Companion Site | Built by Tim Radice | Live scoring at{" "}
-        <a href="https://www43.myfantasyleague.com/2026/home/67549" target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb" }}>MyFantasyLeague</a>
+        <a href="https://www49.myfantasyleague.com/2026/home/20812" target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb" }}>MyFantasyLeague</a>
       </div>
     </div>
   );

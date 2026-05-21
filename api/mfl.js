@@ -1,7 +1,7 @@
 export default async function handler(req, res) {
   const { type } = req.query;
-  const MFL_LEAGUE = "67549";
-  const MFL_BASE = "https://www43.myfantasyleague.com/2026/export";
+  const MFL_LEAGUE = "20812";
+  const MFL_BASE = "https://www49.myfantasyleague.com/2026/export";
 
   const validTypes = ["freeAgents", "players", "rosters", "liveScoring"];
   if (!validTypes.includes(type)) {
