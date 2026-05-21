@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, collection, getDocs } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, writeBatch, collection, getDocs } from "firebase/firestore";
+import * as XLSX from "xlsx";
 
 // ═══════════════════════════════════════════════════════
 // FIREBASE SETUP
@@ -780,6 +781,457 @@ function FreeAgentsView() {
 }
 
 // ═══════════════════════════════════════════════════════
+// ADMIN - SPREADSHEET IMPORT
+// ═══════════════════════════════════════════════════════
+
+const TEAM_SHEET_MAP = {
+  Bishops: "bishops", Butchers: "butchers", Hilander: "hilander",
+  Pandas: "pandas", Mounties: "mounties", Toll: "toll",
+  Brawlers: "brawlers", Convicts: "convicts", Jacks: "jacks",
+  Leps: "leprechauns", Mudcats: "mudcats", NTC: "ntc",
+};
+const TEAM_FULL_NAMES = {
+  bishops: "Big Timber Bishops", butchers: "DuBois Butchers", hilander: "Decatur King Hilander",
+  pandas: "Westchester Trash Pandas", mounties: "Mustang Royal American Mounties", toll: "Toll Collectors",
+  brawlers: "Bay Area Brawlers", convicts: "Alcatraz Convicts", jacks: "Brookline Jacks",
+  leprechauns: "Kill Devil Hills Leprechauns", mudcats: "Mosquito Bay Mudcats", ntc: "No Trade Clause",
+};
+const TEAM_OWNERS = {
+  bishops: "Andrew Serano", butchers: "Michael Naughton", hilander: "Jon Hiland",
+  pandas: "Tim Radice", mounties: "Bill Walker", toll: "Polk Smartt",
+  brawlers: "Dominick Bulone", convicts: "Matthew Condy", jacks: "John Curran",
+  leprechauns: "Andrew Isacco", mudcats: "Jason Creel", ntc: "Justin Clark",
+};
+const TEAM_PHONES = {
+  bishops: "843-513-8611", butchers: "215-284-1849", hilander: "706-280-4370",
+  pandas: "914-224-2215", mounties: "352-332-7767", toll: "215-906-6700",
+  brawlers: "215-219-1575", convicts: "202-465-2130", jacks: "646-825-0762",
+  leprechauns: "410-707-1756", mudcats: "704-534-9836", ntc: "720-595-5280",
+};
+const TEAM_DIVISIONS = {
+  bishops: "Norris", butchers: "Norris", hilander: "Norris",
+  pandas: "Norris", mounties: "Norris", toll: "Norris",
+  brawlers: "Patrick", convicts: "Patrick", jacks: "Patrick",
+  leprechauns: "Patrick", mudcats: "Patrick", ntc: "Patrick",
+};
+
+function parseSpreadsheet(workbook) {
+  const results = { rosters: {}, draftPicks: {}, teams: {}, trades: {}, draftHistory: {}, keeperHighlights: {} };
+  const log = [];
+
+  // 1. Parse team rosters
+  const teamSheets = Object.keys(TEAM_SHEET_MAP);
+  for (const sheetName of teamSheets) {
+    if (!workbook.SheetNames.includes(sheetName)) continue;
+    const ws = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    const teamId = TEAM_SHEET_MAP[sheetName];
+    const players = [];
+    const picks2026 = [];
+    const picks2027 = [];
+
+    // Find championships from sheet
+    let championships = "";
+    for (const row of rows) {
+      for (const cell of row || []) {
+        if (cell && typeof cell === "string" && cell.includes("SACFL Champions:")) {
+          championships = cell.replace("SACFL Champions:", "").trim();
+        }
+      }
+    }
+
+    // Find DRAFT columns
+    let draftCol2026 = null;
+    let draftCol2027 = null;
+    for (let ri = 0; ri < Math.min(rows.length, 6); ri++) {
+      const row = rows[ri] || [];
+      for (let ci = 0; ci < row.length; ci++) {
+        if (row[ci] === "DRAFT") {
+          const nextRow = rows[ri + 1] || [];
+          for (let ck = ci; ck < Math.min(nextRow.length, ci + 5); ck++) {
+            if (nextRow[ck] === 2026 || nextRow[ck] === "2026") draftCol2026 = ck;
+            if (nextRow[ck] === 2027 || nextRow[ck] === "2027") draftCol2027 = ck;
+          }
+        }
+      }
+    }
+
+    // Extract draft picks from DRAFT columns
+    if (draftCol2026 !== null) {
+      for (const row of rows) {
+        const val = row?.[draftCol2026];
+        if (val && typeof val === "string" && /^[RP]\d{2}\./.test(val)) picks2026.push(val.trim());
+      }
+    }
+    if (draftCol2027 !== null) {
+      for (const row of rows) {
+        const val = row?.[draftCol2027];
+        if (val && typeof val === "string" && /^[RP]\d{2}\./.test(val)) picks2027.push(val.trim());
+      }
+    }
+
+    // Extract players from roster
+    for (const row of rows) {
+      if (!row || !row[0] || typeof row[0] !== "string" || row[0].length < 5) continue;
+      const rid = row[0];
+      if (!/^[A-Z]{3}\d{2}/.test(rid)) continue;
+
+      const name = row[1] ? String(row[1]).trim() : "";
+      const pos = row[2] ? String(row[2]).trim() : "";
+      const status = row[3] ? String(row[3]).trim() : "";
+      const acquired = row[4] ? String(row[4]).trim() : "";
+      const year = row[5] ? (typeof row[5] === "number" ? row[5] : String(row[5])) : "";
+      const health = row[6] ? String(row[6]).trim() : "Active";
+
+      if (!name || !status || pos === "draft" || name.includes("#VALUE!")) continue;
+
+      players.push({ name, pos, status, acquired, year, health });
+    }
+
+    results.rosters[teamId] = { players };
+    results.draftPicks[teamId] = { picks2026, picks2027 };
+    results.teams[teamId] = {
+      full: TEAM_FULL_NAMES[teamId] || sheetName,
+      nick: sheetName === "NTC" ? "NTC" : sheetName === "Leps" ? "Leprechauns" : sheetName,
+      owner: TEAM_OWNERS[teamId] || "",
+      phone: TEAM_PHONES[teamId] || "",
+      division: TEAM_DIVISIONS[teamId] || "",
+      championships,
+    };
+    log.push(`${sheetName}: ${players.length} players, ${picks2026.length}/${picks2027.length} picks`);
+  }
+
+  // 2. Parse trades
+  if (workbook.SheetNames.includes("Trades")) {
+    const ws = workbook.Sheets["Trades"];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    let currentYear = null;
+    let currentTrade = null;
+
+    const EXCEL_EPOCH = new Date(1899, 11, 30);
+    const parseDate = (val) => {
+      if (!val) return "";
+      if (val instanceof Date) return val.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      if (typeof val === "number" && val > 30000 && val < 50000) {
+        const d = new Date(EXCEL_EPOCH.getTime() + val * 86400000);
+        return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      }
+      if (typeof val === "string") {
+        if (val.includes("Draft Day")) return "Draft Day";
+        return val;
+      }
+      return String(val);
+    };
+
+    for (const row of rows) {
+      if (!row) continue;
+
+      // Year header
+      if (row[4] && typeof row[4] === "number" && row[4] >= 2000 && row[4] <= 2030) {
+        currentYear = row[4];
+        continue;
+      }
+      if (row[1] && typeof row[1] === "number" && row[1] >= 1999 && row[1] <= 2030) {
+        currentYear = row[1];
+      }
+
+      // Trade number
+      if (row[0] && typeof row[0] === "number" && currentYear) {
+        const dateStr = parseDate(row[4]);
+        if (!results.trades[currentYear]) results.trades[currentYear] = [];
+        currentTrade = { num: row[0], year: currentYear, date: dateStr, sides: [] };
+        results.trades[currentYear].push(currentTrade);
+        continue;
+      }
+
+      // Trade side
+      const desc = row[4];
+      if (desc && typeof desc === "string" && desc.length > 5 && currentTrade) {
+        const team = row[2] ? String(row[2]).trim() : "";
+        if (team) {
+          currentTrade.sides.push({ team, desc: desc.trim() });
+        } else if (currentTrade.sides.length > 0) {
+          currentTrade.sides[currentTrade.sides.length - 1].desc += " " + desc.trim();
+        }
+      }
+    }
+
+    // Clean empty trades
+    for (const yr of Object.keys(results.trades)) {
+      results.trades[yr] = results.trades[yr].filter(t => t.sides.length > 0);
+    }
+    const totalTrades = Object.values(results.trades).reduce((s, a) => s + a.length, 0);
+    log.push(`Trades: ${totalTrades} across ${Object.keys(results.trades).length} years`);
+  }
+
+  // 3. Parse draft history
+  const ROUND_NAMES = {
+    "Round One":1,"Round Two":2,"Round Three":3,"Round Four":4,"Round Five":5,
+    "Round Six":6,"Round Seven":7,"Round Eight":8,"Round Nine":9,"Round Ten":10,
+    "Round Eleven":11,"Round Twelve":12,"Round Thirteen":13,"Round Fourteen":14,
+    "Round Fifteen":15,"Round Sixteen":16,
+  };
+
+  for (const sn of workbook.SheetNames) {
+    const yr = parseInt(sn);
+    if (isNaN(yr) || yr < 1999 || yr > 2027) continue;
+    const ws = workbook.Sheets[sn];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    const picks = [];
+
+    // Detect format: look for "Sel" column header
+    let isNewFormat = false;
+    for (const row of rows) {
+      if (row && row[2] === "Sel") { isNewFormat = true; break; }
+    }
+
+    if (isNewFormat) {
+      // Newer format (2013+): cols 3,4,5,6,7 and 10,11,12,13,14
+      for (const row of rows) {
+        if (!row) continue;
+        for (const [ni,ti,oi,pi,pli] of [[3,4,5,6,7],[10,11,12,13,14]]) {
+          const n = row[ni], t = row[ti], ps = row[pi], pl = row[pli];
+          if (n && typeof n === "string" && /^[RP]\d{2}\./.test(n)) {
+            if (pl && typeof pl === "string" && pl.trim() && pl !== "Player" && !pl.includes("draft")) {
+              picks.push({ pick: n, team: String(t || "").replace(/\*/g, "").trim(), pos: String(ps || "").trim(), player: pl.trim() });
+            }
+          }
+        }
+      }
+    } else {
+      // Older format (2009-2012): cols 1,2,3,4,5 and 7,8,9,10,11
+      for (const row of rows) {
+        if (!row) continue;
+        for (const [ni,ti,oi,pi,pli] of [[1,2,3,4,5],[7,8,9,10,11]]) {
+          const n = row[ni], t = row[ti], ps = row[pi], pl = row[pli];
+          if (n && typeof n === "string" && /^[RP]\d{2}\./.test(n)) {
+            if (pl && typeof pl === "string" && pl.trim() && pl !== "Player" && !pl.includes("draft")) {
+              picks.push({ pick: n, team: String(t || "").replace(/\*/g, "").trim(), pos: String(ps || "").trim(), player: pl.trim() });
+            }
+          }
+        }
+      }
+    }
+
+    if (picks.length > 0) {
+      picks.sort((a, b) => {
+        const at = a.pick[0] === "R" ? 0 : 1;
+        const bt = b.pick[0] === "R" ? 0 : 1;
+        return at !== bt ? at - bt : a.pick.localeCompare(b.pick);
+      });
+      results.draftHistory[yr] = picks;
+      log.push(`Draft ${yr}: ${picks.length} picks`);
+    }
+  }
+
+  // 4. Parse keeper highlights (yellow cells) - not possible from XLSX in browser
+  // Keeper highlights require cell formatting which SheetJS can read
+  for (const sn of workbook.SheetNames) {
+    const yr = parseInt(sn);
+    if (isNaN(yr) || yr < 2013 || yr > 2027) continue;
+    const ws = workbook.Sheets[sn];
+
+    // Try to read cell styles for yellow highlighting
+    const keepers = [];
+    const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+    for (let R = range.s.r; R <= range.e.r; R++) {
+      // Check player name columns (7 and 14 in new format)
+      for (const C of [7, 14]) {
+        const addr = XLSX.utils.encode_cell({ r: R, c: C });
+        const cell = ws[addr];
+        if (!cell || !cell.v || typeof cell.v !== "string") continue;
+        // Check for yellow fill
+        if (cell.s && cell.s.fgColor && cell.s.fgColor.rgb) {
+          const rgb = cell.s.fgColor.rgb.toUpperCase();
+          if (rgb.includes("FFFF") && rgb !== "FFFFFF") {
+            keepers.push(cell.v.trim());
+          }
+        }
+      }
+    }
+    if (keepers.length > 5) {
+      results.keeperHighlights[yr] = keepers;
+      log.push(`Keepers ${yr}: ${keepers.length} highlighted`);
+    }
+  }
+
+  return { results, log };
+}
+
+async function uploadToFirestore(results, setStatus) {
+  const steps = [];
+
+  // 1. Teams
+  setStatus("Uploading teams...");
+  const b1 = writeBatch(db);
+  for (const [id, team] of Object.entries(results.teams)) {
+    b1.set(doc(db, "teams", id), team);
+  }
+  await b1.commit();
+  steps.push(`Teams: ${Object.keys(results.teams).length}`);
+
+  // 2. Rosters
+  setStatus("Uploading rosters...");
+  const b2 = writeBatch(db);
+  for (const [id, data] of Object.entries(results.rosters)) {
+    b2.set(doc(db, "rosters", id), data);
+  }
+  await b2.commit();
+  steps.push(`Rosters: ${Object.keys(results.rosters).length}`);
+
+  // 3. Draft Picks
+  setStatus("Uploading draft picks...");
+  const b3 = writeBatch(db);
+  for (const [id, data] of Object.entries(results.draftPicks)) {
+    b3.set(doc(db, "draftPicks", id), data);
+  }
+  await b3.commit();
+  steps.push(`Draft picks: ${Object.keys(results.draftPicks).length}`);
+
+  // 4. Trades (chunked)
+  setStatus("Uploading trades...");
+  const tradeYears = Object.keys(results.trades);
+  for (let i = 0; i < tradeYears.length; i += 10) {
+    const chunk = tradeYears.slice(i, i + 10);
+    const bx = writeBatch(db);
+    for (const yr of chunk) {
+      bx.set(doc(db, "trades", yr), { trades: results.trades[yr] });
+    }
+    await bx.commit();
+  }
+  steps.push(`Trades: ${tradeYears.length} years`);
+
+  // 5. Draft History (chunked)
+  setStatus("Uploading draft history...");
+  const dhYears = Object.keys(results.draftHistory);
+  for (let i = 0; i < dhYears.length; i += 10) {
+    const chunk = dhYears.slice(i, i + 10);
+    const bx = writeBatch(db);
+    for (const yr of chunk) {
+      bx.set(doc(db, "draftHistory", yr), { picks: results.draftHistory[yr] });
+    }
+    await bx.commit();
+  }
+  steps.push(`Draft history: ${dhYears.length} years`);
+
+  // 6. Keeper Highlights
+  if (Object.keys(results.keeperHighlights).length > 0) {
+    setStatus("Uploading keeper highlights...");
+    const b6 = writeBatch(db);
+    for (const [yr, players] of Object.entries(results.keeperHighlights)) {
+      b6.set(doc(db, "keeperHighlights", yr), { players });
+    }
+    await b6.commit();
+    steps.push(`Keeper highlights: ${Object.keys(results.keeperHighlights).length} years`);
+  }
+
+  return steps;
+}
+
+function AdminView() {
+  const [file, setFile] = useState(null);
+  const [parsing, setParsing] = useState(false);
+  const [parseLog, setParseLog] = useState(null);
+  const [parsed, setParsed] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState("");
+  const [uploadDone, setUploadDone] = useState(false);
+  const [uploadLog, setUploadLog] = useState(null);
+
+  const handleFile = (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    setFile(f);
+    setParsing(true);
+    setParseLog(null);
+    setParsed(null);
+    setUploadDone(false);
+    setUploadLog(null);
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellStyles: true });
+        const { results, log } = parseSpreadsheet(wb);
+        setParsed(results);
+        setParseLog(log);
+      } catch (err) {
+        setParseLog(["Error parsing file: " + err.message]);
+      }
+      setParsing(false);
+    };
+    reader.readAsArrayBuffer(f);
+  };
+
+  const handleUpload = async () => {
+    if (!parsed) return;
+    setUploading(true);
+    setUploadDone(false);
+    try {
+      const steps = await uploadToFirestore(parsed, setUploadStatus);
+      setUploadLog(steps);
+      setUploadDone(true);
+      setUploadStatus("Import complete! Refresh the page to see updated data.");
+    } catch (err) {
+      setUploadStatus("Error: " + err.message);
+    }
+    setUploading(false);
+  };
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 8, fontFamily: display }}>Import Spreadsheet</h2>
+      <p style={{ fontSize: 13, color: "#64748b", marginBottom: 20, lineHeight: 1.6 }}>
+        Upload the master SACFL Excel file to update all site data. This will replace rosters, draft picks, trades, and draft history in the database.
+      </p>
+
+      <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 24, marginBottom: 16 }}>
+        <label style={{ display: "block", marginBottom: 12, fontSize: 14, fontWeight: 700, color: "#0f172a" }}>
+          Select spreadsheet file (.xlsx or .xlsm)
+        </label>
+        <input type="file" accept=".xlsx,.xlsm" onChange={handleFile} style={{ fontSize: 13 }} />
+      </div>
+
+      {parsing && <Spin msg="Parsing spreadsheet..." />}
+
+      {parseLog && (
+        <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 16, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: "#0f172a" }}>Parse Results</h4>
+          <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.8 }}>
+            {parseLog.map((line, i) => (
+              <div key={i} style={{ padding: "2px 0", borderBottom: "1px solid #f1f5f9" }}>
+                {line.startsWith("Error") ? <span style={{ color: "#dc2626" }}>{line}</span> : <span>✓ {line}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {parsed && !uploadDone && (
+        <button onClick={handleUpload} disabled={uploading} style={{
+          padding: "12px 24px", fontSize: 14, fontWeight: 700, border: "none", borderRadius: 8,
+          cursor: uploading ? "not-allowed" : "pointer",
+          background: uploading ? "#94a3b8" : "#2563eb", color: "#fff", fontFamily: "inherit",
+        }}>
+          {uploading ? uploadStatus : "Upload to Database"}
+        </button>
+      )}
+
+      {uploadDone && (
+        <div style={{ background: "#dcfce7", borderRadius: 10, border: "1px solid #86efac", padding: 16 }}>
+          <h4 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 700, color: "#166534" }}>Import Complete!</h4>
+          <div style={{ fontSize: 12, color: "#166534", lineHeight: 1.8 }}>
+            {uploadLog && uploadLog.map((line, i) => <div key={i}>✓ {line}</div>)}
+          </div>
+          <p style={{ fontSize: 12, color: "#166534", marginTop: 8 }}>Refresh the page to see the updated data.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════
 
@@ -792,6 +1244,7 @@ const TABS = [
   { id: "trades", label: "Trade Log" },
   { id: "history", label: "Name History" },
   { id: "info", label: "League Info" },
+  { id: "admin", label: "Admin" },
 ];
 
 function App() {
@@ -846,6 +1299,7 @@ function App() {
           {tab === "trades" && <TradeLogView />}
           {tab === "history" && <NameHistoryView nameHistory={d.nameHistory} leagueInfo={d.leagueInfo} />}
           {tab === "info" && <LeagueInfoView teams={d.teams} leagueInfo={d.leagueInfo} />}
+          {tab === "admin" && <AdminView />}
         </>}
       </div>
       <div style={{ textAlign: "center", padding: "16px 24px", fontSize: 11, color: "#94a3b8", borderTop: "1px solid #e2e5e9" }}>
