@@ -848,7 +848,7 @@ const TEAM_DIVISIONS = {
 };
 
 function parseSpreadsheet(workbook) {
-  const results = { rosters: {}, draftPicks: {}, teams: {}, trades: {}, draftHistory: {}, keeperHighlights: {} };
+  const results = { rosters: {}, draftPicks: {}, teams: {}, trades: {} };
   const log = [];
 
   // 1. Parse team rosters
@@ -996,97 +996,6 @@ function parseSpreadsheet(workbook) {
     log.push(`Trades: ${totalTrades} across ${Object.keys(results.trades).length} years`);
   }
 
-  // 3. Parse draft history
-  const ROUND_NAMES = {
-    "Round One":1,"Round Two":2,"Round Three":3,"Round Four":4,"Round Five":5,
-    "Round Six":6,"Round Seven":7,"Round Eight":8,"Round Nine":9,"Round Ten":10,
-    "Round Eleven":11,"Round Twelve":12,"Round Thirteen":13,"Round Fourteen":14,
-    "Round Fifteen":15,"Round Sixteen":16,
-  };
-
-  for (const sn of workbook.SheetNames) {
-    const yr = parseInt(sn);
-    if (isNaN(yr) || yr < 1999 || yr > 2027) continue;
-    const ws = workbook.Sheets[sn];
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
-    const picks = [];
-
-    // Detect format: look for "Sel" column header
-    let isNewFormat = false;
-    for (const row of rows) {
-      if (row && row[2] === "Sel") { isNewFormat = true; break; }
-    }
-
-    if (isNewFormat) {
-      // Newer format (2013+): cols 3,4,5,6,7 and 10,11,12,13,14
-      for (const row of rows) {
-        if (!row) continue;
-        for (const [ni,ti,oi,pi,pli] of [[3,4,5,6,7],[10,11,12,13,14]]) {
-          const n = row[ni], t = row[ti], ps = row[pi], pl = row[pli];
-          if (n && typeof n === "string" && /^[RP]\d{2}\./.test(n)) {
-            if (pl && typeof pl === "string" && pl.trim() && pl !== "Player" && !pl.includes("draft")) {
-              picks.push({ pick: n, team: String(t || "").replace(/\*/g, "").trim(), pos: String(ps || "").trim(), player: pl.trim() });
-            }
-          }
-        }
-      }
-    } else {
-      // Older format (2009-2012): cols 1,2,3,4,5 and 7,8,9,10,11
-      for (const row of rows) {
-        if (!row) continue;
-        for (const [ni,ti,oi,pi,pli] of [[1,2,3,4,5],[7,8,9,10,11]]) {
-          const n = row[ni], t = row[ti], ps = row[pi], pl = row[pli];
-          if (n && typeof n === "string" && /^[RP]\d{2}\./.test(n)) {
-            if (pl && typeof pl === "string" && pl.trim() && pl !== "Player" && !pl.includes("draft")) {
-              picks.push({ pick: n, team: String(t || "").replace(/\*/g, "").trim(), pos: String(ps || "").trim(), player: pl.trim() });
-            }
-          }
-        }
-      }
-    }
-
-    if (picks.length > 0) {
-      picks.sort((a, b) => {
-        const at = a.pick[0] === "R" ? 0 : 1;
-        const bt = b.pick[0] === "R" ? 0 : 1;
-        return at !== bt ? at - bt : a.pick.localeCompare(b.pick);
-      });
-      results.draftHistory[yr] = picks;
-      log.push(`Draft ${yr}: ${picks.length} picks`);
-    }
-  }
-
-  // 4. Parse keeper highlights (yellow cells) - not possible from XLSX in browser
-  // Keeper highlights require cell formatting which SheetJS can read
-  for (const sn of workbook.SheetNames) {
-    const yr = parseInt(sn);
-    if (isNaN(yr) || yr < 2013 || yr > 2027) continue;
-    const ws = workbook.Sheets[sn];
-
-    // Try to read cell styles for yellow highlighting
-    const keepers = [];
-    const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
-    for (let R = range.s.r; R <= range.e.r; R++) {
-      // Check player name columns (7 and 14 in new format)
-      for (const C of [7, 14]) {
-        const addr = XLSX.utils.encode_cell({ r: R, c: C });
-        const cell = ws[addr];
-        if (!cell || !cell.v || typeof cell.v !== "string") continue;
-        // Check for yellow fill
-        if (cell.s && cell.s.fgColor && cell.s.fgColor.rgb) {
-          const rgb = cell.s.fgColor.rgb.toUpperCase();
-          if (rgb.includes("FFFF") && rgb !== "FFFFFF") {
-            keepers.push(cell.v.trim());
-          }
-        }
-      }
-    }
-    if (keepers.length > 5) {
-      results.keeperHighlights[yr] = keepers;
-      log.push(`Keepers ${yr}: ${keepers.length} highlighted`);
-    }
-  }
-
   return { results, log };
 }
 
@@ -1132,30 +1041,6 @@ async function uploadToFirestore(results, setStatus) {
     await bx.commit();
   }
   steps.push(`Trades: ${tradeYears.length} years`);
-
-  // 5. Draft History (chunked)
-  setStatus("Uploading draft history...");
-  const dhYears = Object.keys(results.draftHistory);
-  for (let i = 0; i < dhYears.length; i += 10) {
-    const chunk = dhYears.slice(i, i + 10);
-    const bx = writeBatch(db);
-    for (const yr of chunk) {
-      bx.set(doc(db, "draftHistory", yr), { picks: results.draftHistory[yr] });
-    }
-    await bx.commit();
-  }
-  steps.push(`Draft history: ${dhYears.length} years`);
-
-  // 6. Keeper Highlights
-  if (Object.keys(results.keeperHighlights).length > 0) {
-    setStatus("Uploading keeper highlights...");
-    const b6 = writeBatch(db);
-    for (const [yr, players] of Object.entries(results.keeperHighlights)) {
-      b6.set(doc(db, "keeperHighlights", yr), { players });
-    }
-    await b6.commit();
-    steps.push(`Keeper highlights: ${Object.keys(results.keeperHighlights).length} years`);
-  }
 
   return steps;
 }
@@ -1215,7 +1100,7 @@ function AdminView() {
     <div>
       <h2 style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 8, fontFamily: display }}>Import Spreadsheet</h2>
       <p style={{ fontSize: 13, color: "#64748b", marginBottom: 20, lineHeight: 1.6 }}>
-        Upload the master SACFL Excel file to update all site data. This will replace rosters, draft picks, trades, and draft history in the database.
+        Upload the master SACFL Excel file to update rosters, team info, draft picks, and trades. Historical draft results and keeper highlights are preserved and won't be overwritten.
       </p>
 
       <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e5e9", padding: 24, marginBottom: 16 }}>
@@ -1261,6 +1146,7 @@ function AdminView() {
       )}
 
       <MflRosterExport />
+      <RosterCompare />
     </div>
   );
 }
@@ -1502,6 +1388,190 @@ function MflRosterExport() {
               {pushStatus}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Reverse franchise map for display
+const MFL_FRANCHISE_REVERSE = Object.fromEntries(Object.entries(MFL_FRANCHISE_MAP).map(([k,v]) => [v,k]));
+
+function RosterCompare() {
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState(null);
+  const [error, setError] = useState(null);
+
+  const runCompare = async () => {
+    setLoading(true);
+    setError(null);
+    setResults(null);
+
+    try {
+      // 1. Load Firebase rosters
+      const rosterSnap = await getDocs(collection(db, "rosters"));
+      const fbRosters = {};
+      rosterSnap.forEach(d => { fbRosters[d.id] = d.data(); });
+
+      // 2. Load MFL rosters (2026)
+      const mflRosterResp = await fetch("/api/mfl?type=rosters");
+      const mflRosterData = await mflRosterResp.json();
+      const mflFranchises = mflRosterData?.rosters?.franchise || [];
+
+      // 3. Load MFL player database for ID lookup
+      const playerResp = await fetch("/api/mfl?type=players");
+      const playerData = await playerResp.json();
+      const mflPlayers = {};
+      (playerData?.players?.player || []).forEach(p => {
+        if (p.id) mflPlayers[p.id] = p;
+      });
+
+      // 4. Build name lookup for Firebase players
+      const fbNameLookup = {};
+      (playerData?.players?.player || []).forEach(p => {
+        if (p.name) {
+          const norm = p.name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
+          fbNameLookup[norm] = p;
+        }
+      });
+
+      // 5. Compare each team
+      const comparison = {};
+
+      for (const [teamId, rosterData] of Object.entries(fbRosters)) {
+        const franchiseId = MFL_FRANCHISE_MAP[teamId];
+        if (!franchiseId) continue;
+
+        // Get MFL roster for this franchise
+        const mflFranch = mflFranchises.find(f => f.id === franchiseId);
+        const mflPlayerList = mflFranch?.player || [];
+        const mflIds = new Set(
+          Array.isArray(mflPlayerList)
+            ? mflPlayerList.map(p => typeof p === "string" ? p : p.id)
+            : mflPlayerList.id ? [mflPlayerList.id] : []
+        );
+
+        // Get Firebase player names and match to MFL IDs
+        const fbPlayers = rosterData.players || [];
+        const fbMatchedIds = new Set();
+        const fbPlayerDetails = [];
+
+        for (const p of fbPlayers) {
+          const name = p.name || "";
+          const parts = name.split(/\s+/);
+          let mflId = null;
+
+          // Try name matching
+          if (parts.length >= 2) {
+            const suffixes = ["jr", "jr.", "ii", "iii", "iv", "sr", "sr."];
+            let last = parts[parts.length - 1];
+            let first = parts[0];
+            if (parts.length > 2 && suffixes.includes(parts[parts.length - 1].toLowerCase())) {
+              last = parts[parts.length - 2] + " " + parts[parts.length - 1];
+              first = parts[0];
+            }
+            const flipped = (last + ", " + first).toLowerCase().replace(/[^a-z,\s]/g, "").trim();
+            const match = fbNameLookup[flipped];
+            if (match) mflId = match.id;
+          }
+          if (!mflId) {
+            const norm = name.toLowerCase().replace(/[^a-z,\s]/g, "").trim();
+            const match = fbNameLookup[norm];
+            if (match) mflId = match.id;
+          }
+
+          if (mflId) {
+            fbMatchedIds.add(mflId);
+            fbPlayerDetails.push({ name, pos: p.pos, mflId, inMfl: mflIds.has(mflId) });
+          } else {
+            fbPlayerDetails.push({ name, pos: p.pos, mflId: null, inMfl: false });
+          }
+        }
+
+        // Find players in MFL but not in Firebase
+        const mflOnly = [];
+        for (const mid of mflIds) {
+          if (!fbMatchedIds.has(mid)) {
+            const mp = mflPlayers[mid];
+            mflOnly.push({ name: mp ? mp.name : mid, pos: mp?.position || "?", mflId: mid });
+          }
+        }
+
+        const missing = fbPlayerDetails.filter(p => !p.inMfl);
+        const matched = fbPlayerDetails.filter(p => p.inMfl);
+
+        comparison[teamId] = { matched, missing, mflOnly, mflCount: mflIds.size, fbCount: fbPlayers.length };
+      }
+
+      setResults(comparison);
+    } catch (err) {
+      setError(err.message);
+    }
+    setLoading(false);
+  };
+
+  const totalMatched = results ? Object.values(results).reduce((s, r) => s + r.matched.length, 0) : 0;
+  const totalMissing = results ? Object.values(results).reduce((s, r) => s + r.missing.length, 0) : 0;
+  const totalExtra = results ? Object.values(results).reduce((s, r) => s + r.mflOnly.length, 0) : 0;
+
+  return (
+    <div style={{ marginTop: 32 }}>
+      <h2 style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 8, fontFamily: display }}>Compare Rosters: Site vs MFL</h2>
+      <p style={{ fontSize: 13, color: "#64748b", marginBottom: 16, lineHeight: 1.6 }}>
+        Check if the MFL rosters match what's in the site database.
+      </p>
+
+      <button onClick={runCompare} disabled={loading} style={{
+        padding: "12px 24px", fontSize: 14, fontWeight: 700, border: "none", borderRadius: 8,
+        cursor: loading ? "not-allowed" : "pointer",
+        background: loading ? "#94a3b8" : "#2563eb", color: "#fff", fontFamily: "inherit", marginBottom: 16,
+      }}>
+        {loading ? "Comparing..." : "Run Comparison"}
+      </button>
+
+      {error && <div style={{ color: "#dc2626", padding: 12, background: "#fef2f2", borderRadius: 8, marginBottom: 16 }}>Error: {error}</div>}
+
+      {results && (
+        <div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+            <div style={{ padding: "10px 16px", background: "#dcfce7", borderRadius: 8, fontSize: 13, fontWeight: 700, color: "#166534" }}>
+              {totalMatched} matched
+            </div>
+            <div style={{ padding: "10px 16px", background: totalMissing > 0 ? "#fef3c7" : "#dcfce7", borderRadius: 8, fontSize: 13, fontWeight: 700, color: totalMissing > 0 ? "#92400e" : "#166534" }}>
+              {totalMissing} in site but not MFL
+            </div>
+            <div style={{ padding: "10px 16px", background: totalExtra > 0 ? "#dbeafe" : "#dcfce7", borderRadius: 8, fontSize: 13, fontWeight: 700, color: totalExtra > 0 ? "#1d4ed8" : "#166534" }}>
+              {totalExtra} in MFL but not site
+            </div>
+          </div>
+
+          {Object.entries(results).map(([teamId, r]) => {
+            const hasIssues = r.missing.length > 0 || r.mflOnly.length > 0;
+            return (
+              <details key={teamId} open={hasIssues} style={{ marginBottom: 8, background: "#fff", borderRadius: 8, border: "1px solid #e2e5e9", overflow: "hidden" }}>
+                <summary style={{ padding: "10px 16px", cursor: "pointer", fontSize: 13, fontWeight: 700, color: hasIssues ? "#92400e" : "#166534", background: hasIssues ? "#fffbeb" : "#f0fdf4" }}>
+                  {teamId.toUpperCase()} — {r.matched.length} matched, {r.missing.length} missing from MFL, {r.mflOnly.length} extra in MFL (Site: {r.fbCount}, MFL: {r.mflCount})
+                </summary>
+                <div style={{ padding: "8px 16px 12px", fontSize: 12, lineHeight: 1.8 }}>
+                  {r.missing.length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontWeight: 700, color: "#92400e", marginBottom: 2 }}>Missing from MFL:</div>
+                      {r.missing.map((p, i) => <div key={i} style={{ color: "#92400e", paddingLeft: 8 }}>- {p.name} ({p.pos}){p.mflId ? ` [MFL ID: ${p.mflId}]` : " [no MFL match]"}</div>)}
+                    </div>
+                  )}
+                  {r.mflOnly.length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontWeight: 700, color: "#1d4ed8", marginBottom: 2 }}>In MFL but not on site:</div>
+                      {r.mflOnly.map((p, i) => <div key={i} style={{ color: "#1d4ed8", paddingLeft: 8 }}>+ {p.name} ({p.pos})</div>)}
+                    </div>
+                  )}
+                  {r.missing.length === 0 && r.mflOnly.length === 0 && (
+                    <div style={{ color: "#166534" }}>✓ Perfect match</div>
+                  )}
+                </div>
+              </details>
+            );
+          })}
         </div>
       )}
     </div>
